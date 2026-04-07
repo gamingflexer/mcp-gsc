@@ -1,0 +1,9 @@
+sa-key.json
+service_account_credentials.json
+client_secrets.json
+*.json
+!requirements*.json
+__pycache__/
+*.pyc
+.env
+.env.*
