@@ -1775,90 +1775,6 @@ async def get_trends_related_queries(
 
 
 @mcp.tool()
-async def get_trends_related_topics(
-    keywords: str,
-    timeframe: str = "today 12-m",
-    geo: str = "",
-    gprop: str = "",
-) -> str:
-    """
-    Get top and rising related topics for given keywords from Google Trends.
-
-    Args:
-        keywords: Comma-separated keywords (max 5)
-        timeframe: Time range (same format as get_trends_interest_over_time)
-        geo: Two-letter country code, e.g. "IN". Empty = worldwide.
-        gprop: Google property filter. One of: "" (web), "images", "news", "youtube", "froogle"
-    """
-    if not PYTRENDS_AVAILABLE:
-        return "Error: pytrends is not installed on this server."
-    try:
-        kw_list = [k.strip() for k in keywords.split(",") if k.strip()][:5]
-        pt = _build_pytrends()
-        pt.build_payload(kw_list, timeframe=timeframe, geo=geo, gprop=gprop)
-        related = pt.related_topics()
-        output = {}
-        for kw, data in related.items():
-            output[kw] = {
-                "top": data["top"].to_dict(orient="records") if data.get("top") is not None and not data["top"].empty else [],
-                "rising": data["rising"].to_dict(orient="records") if data.get("rising") is not None and not data["rising"].empty else [],
-            }
-        return json.dumps({"keywords": kw_list, "timeframe": timeframe, "geo": geo or "worldwide", "related_topics": output})
-    except Exception as e:
-        return f"Error fetching related topics: {str(e)}"
-
-
-@mcp.tool()
-async def get_trends_trending_searches(
-    country: str = "india",
-) -> str:
-    """
-    Get current trending searches for a country from Google Trends.
-
-    Args:
-        country: Country name in lowercase, e.g. "india", "united_states", "united_kingdom",
-                 "australia", "canada", "germany", "france", "brazil", "japan"
-    """
-    if not PYTRENDS_AVAILABLE:
-        return "Error: pytrends is not installed on this server."
-    try:
-        pt = _build_pytrends()
-        df = pt.trending_searches(pn=country)
-        if df is None or df.empty:
-            return json.dumps({"country": country, "trending": [], "message": "No trending data."})
-        trends = df[0].tolist()
-        return json.dumps({"country": country, "trending": trends, "count": len(trends)})
-    except Exception as e:
-        return f"Error fetching trending searches: {str(e)}"
-
-
-@mcp.tool()
-async def get_trends_realtime_trending(
-    geo: str = "IN",
-    cat: str = "all",
-) -> str:
-    """
-    Get real-time trending searches from Google Trends.
-
-    Args:
-        geo: Two-letter country code, e.g. "IN" (India), "US", "GB", "AU"
-        cat: Category filter. One of: "all", "b" (business), "e" (entertainment),
-             "m" (health), "t" (sci/tech), "s" (sports), "h" (top stories)
-    """
-    if not PYTRENDS_AVAILABLE:
-        return "Error: pytrends is not installed on this server."
-    try:
-        pt = _build_pytrends()
-        df = pt.realtime_trending_searches(pn=geo)
-        if df is None or df.empty:
-            return json.dumps({"geo": geo, "trending": [], "message": "No real-time trending data."})
-        result = df.to_dict(orient="records")
-        return json.dumps({"geo": geo, "trending": result, "count": len(result)})
-    except Exception as e:
-        return f"Error fetching real-time trending searches: {str(e)}"
-
-
-@mcp.tool()
 async def get_trends_suggestions(
     keyword: str,
     hl: str = "en-US",
@@ -1878,35 +1794,6 @@ async def get_trends_suggestions(
         return json.dumps({"keyword": keyword, "suggestions": suggestions, "count": len(suggestions)})
     except Exception as e:
         return f"Error fetching suggestions: {str(e)}"
-
-
-@mcp.tool()
-async def get_trends_top_charts(
-    date: int,
-    geo: str = "GLOBAL",
-    hl: str = "en-US",
-    tz: int = 330,
-) -> str:
-    """
-    Get Google Trends top charts for a given year.
-
-    Args:
-        date: Year as integer, e.g. 2024, 2023, 2022
-        geo: Two-letter country code or "GLOBAL", e.g. "IN", "US", "GLOBAL"
-        hl: Language code, e.g. "en-US"
-        tz: Timezone offset in minutes. 330 = IST (India), 0 = UTC, -300 = EST
-    """
-    if not PYTRENDS_AVAILABLE:
-        return "Error: pytrends is not installed on this server."
-    try:
-        pt = _build_pytrends(hl=hl, tz=tz)
-        df = pt.top_charts(date, hl=hl, tz=tz, geo=geo)
-        if df is None or df.empty:
-            return json.dumps({"year": date, "geo": geo, "charts": [], "message": "No chart data."})
-        result = df.to_dict(orient="records")
-        return json.dumps({"year": date, "geo": geo, "charts": result, "count": len(result)})
-    except Exception as e:
-        return f"Error fetching top charts: {str(e)}"
 
 
 @mcp.tool()
