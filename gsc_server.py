@@ -19,6 +19,41 @@ try:
 except ImportError:
     PYTRENDS_AVAILABLE = False
 
+try:
+    import googlemaps
+    GMAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "")
+    _gmaps = googlemaps.Client(key=GMAPS_API_KEY) if GMAPS_API_KEY else None
+    GMAPS_AVAILABLE = bool(GMAPS_API_KEY)
+except ImportError:
+    _gmaps = None
+    GMAPS_AVAILABLE = False
+
+def _maps_client():
+    if not _gmaps:
+        raise RuntimeError("googlemaps not installed or GOOGLE_MAPS_API_KEY not set")
+    return _gmaps
+
+def _maps_ok(data) -> str:
+    return json.dumps(data, default=str)
+
+def _maps_err(e: Exception) -> str:
+    return json.dumps({"error": type(e).__name__, "message": str(e)})
+
+def _format_place(p: dict) -> dict:
+    loc = p.get("geometry", {}).get("location", {})
+    hours = p.get("opening_hours", {})
+    return {
+        "name": p.get("name", ""),
+        "address": p.get("vicinity") or p.get("formatted_address", ""),
+        "lat": loc.get("lat"),
+        "lng": loc.get("lng"),
+        "place_id": p.get("place_id", ""),
+        "rating": p.get("rating"),
+        "user_ratings_total": p.get("user_ratings_total"),
+        "open_now": hours.get("open_now"),
+        "types": p.get("types", []),
+    }
+
 # Suppress the noisy file_cache warning from google-api-python-client.
 # Some MCP hosts (e.g. GitHub Copilot CLI) treat any stderr output as a
 # fatal error, so this prevents false crashes.
@@ -1649,6 +1684,345 @@ async def reauthenticate() -> str:
     except Exception as e:
         return f"Error during reauthentication: {str(e)}"
 
+
+# ===========================================================================
+# GOOGLE MAPS TOOLS
+# ===========================================================================
+
+@mcp.tool()
+def maps_geocode(address: str, language: str = "en") -> str:
+    """Convert an address or place name to latitude/longitude coordinates.
+
+    Args:
+        address: Address or place name (e.g. "Bandra, Mumbai", "Koramangala, Bangalore")
+        language: Language for results (default: en)
+    """
+    try:
+        results = _maps_client().geocode(address, language=language)
+        if not results:
+            return _maps_ok({"status": "zero_results", "address": address})
+        r = results[0]
+        loc = r["geometry"]["location"]
+        return _maps_ok({
+            "status": "ok",
+            "address": address,
+            "formatted_address": r.get("formatted_address", ""),
+            "lat": loc["lat"],
+            "lng": loc["lng"],
+            "place_id": r.get("place_id", ""),
+            "location_type": r.get("geometry", {}).get("location_type", ""),
+        })
+    except Exception as e:
+        return _maps_err(e)
+
+
+@mcp.tool()
+def maps_reverse_geocode(lat: float, lng: float, language: str = "en") -> str:
+    """Convert latitude/longitude to a human-readable address.
+
+    Args:
+        lat: Latitude (e.g. 19.0596)
+        lng: Longitude (e.g. 72.8295)
+        language: Language for results (default: en)
+    """
+    try:
+        results = _maps_client().reverse_geocode((lat, lng), language=language)
+        if not results:
+            return _maps_ok({"status": "zero_results", "lat": lat, "lng": lng})
+        r = results[0]
+        components = {c["types"][0]: c["long_name"]
+                      for c in r.get("address_components", []) if c.get("types")}
+        return _maps_ok({
+            "status": "ok",
+            "lat": lat, "lng": lng,
+            "formatted_address": r.get("formatted_address", ""),
+            "place_id": r.get("place_id", ""),
+            "components": components,
+        })
+    except Exception as e:
+        return _maps_err(e)
+
+
+@mcp.tool()
+def maps_search_nearby_doctors(
+    lat: float,
+    lng: float,
+    radius_meters: int = 5000,
+    specialty: str = "",
+    language: str = "en",
+    max_results: int = 20,
+) -> str:
+    """Search for doctors near a latitude/longitude point.
+
+    Args:
+        lat: Latitude of the search center
+        lng: Longitude of the search center
+        radius_meters: Search radius in meters (default: 5000, max: 50000)
+        specialty: Doctor specialty keyword (e.g. "cardiologist", "dermatologist", "ENT").
+                   Leave empty for all doctors/clinics.
+        language: Language for results (default: en)
+        max_results: Maximum results to return (default: 20)
+    """
+    try:
+        radius_meters = min(radius_meters, 50000)
+        keyword = specialty if specialty else "doctor"
+        response = _maps_client().places_nearby(
+            location=(lat, lng),
+            radius=radius_meters,
+            keyword=keyword,
+            type="doctor",
+            language=language,
+        )
+        results = [_format_place(p) for p in response.get("results", [])[:max_results]]
+        return _maps_ok({
+            "status": "ok",
+            "center": {"lat": lat, "lng": lng},
+            "radius_meters": radius_meters,
+            "specialty": specialty,
+            "count": len(results),
+            "results": results,
+        })
+    except Exception as e:
+        return _maps_err(e)
+
+
+@mcp.tool()
+def maps_search_doctors_text(
+    query: str,
+    location_name: str = "",
+    lat: float = None,
+    lng: float = None,
+    radius_meters: int = 10000,
+    language: str = "en",
+) -> str:
+    """Search doctors/clinics using free-text query with optional location bias.
+
+    Best for natural language queries like:
+      - "cardiologist in Pune"
+      - "ENT specialist near Bandra Mumbai"
+      - "best pediatrician Koramangala"
+
+    Args:
+        query: Search query (e.g. "cardiologist in Pune")
+        location_name: Location name for bias (e.g. "Bandra, Mumbai") — geocoded automatically
+        lat: Latitude for location bias (alternative to location_name)
+        lng: Longitude for location bias (alternative to location_name)
+        radius_meters: Bias radius in meters (default: 10000)
+        language: Language for results (default: en)
+    """
+    try:
+        location = None
+        if location_name:
+            geo = _maps_client().geocode(location_name, language=language)
+            if geo:
+                loc = geo[0]["geometry"]["location"]
+                location = (loc["lat"], loc["lng"])
+        elif lat is not None and lng is not None:
+            location = (lat, lng)
+
+        kwargs = {"language": language}
+        if location:
+            kwargs["location"] = location
+            kwargs["radius"] = radius_meters
+
+        response = _maps_client().places(query=query, **kwargs)
+        results = [_format_place(p) for p in response.get("results", [])]
+        return _maps_ok({
+            "status": "ok",
+            "query": query,
+            "location": location_name or ({"lat": lat, "lng": lng} if lat else None),
+            "count": len(results),
+            "results": results,
+        })
+    except Exception as e:
+        return _maps_err(e)
+
+
+@mcp.tool()
+def maps_search_doctors_by_specialty(
+    specialty: str,
+    location_name: str,
+    radius_km: float = 5.0,
+    language: str = "en",
+) -> str:
+    """One-shot: find doctors of a specialty near a location name (geocoded automatically).
+
+    Examples:
+      maps_search_doctors_by_specialty("cardiologist", "Pune", radius_km=10)
+      maps_search_doctors_by_specialty("orthopedic", "Bandra Mumbai", radius_km=3)
+
+    Args:
+        specialty: Doctor specialty (e.g. "cardiologist", "dermatologist", "gynecologist")
+        location_name: Location name (e.g. "Koramangala Bangalore", "Andheri Mumbai")
+        radius_km: Search radius in kilometers (default: 5, max: 50)
+        language: Language for results (default: en)
+    """
+    try:
+        radius_km = min(radius_km, 50.0)
+        geo = _maps_client().geocode(location_name, language=language)
+        if not geo:
+            return _maps_ok({"status": "zero_results", "error": f"Could not geocode: {location_name}"})
+        loc = geo[0]["geometry"]["location"]
+        lat, lng = loc["lat"], loc["lng"]
+        response = _maps_client().places_nearby(
+            location=(lat, lng),
+            radius=int(radius_km * 1000),
+            keyword=specialty,
+            type="doctor",
+            language=language,
+        )
+        results = [_format_place(p) for p in response.get("results", [])]
+        return _maps_ok({
+            "status": "ok",
+            "specialty": specialty,
+            "location": location_name,
+            "geocoded": {"lat": lat, "lng": lng, "formatted": geo[0].get("formatted_address", "")},
+            "radius_km": radius_km,
+            "count": len(results),
+            "results": results,
+        })
+    except Exception as e:
+        return _maps_err(e)
+
+
+@mcp.tool()
+def maps_search_hospitals_clinics(
+    lat: float,
+    lng: float,
+    radius_meters: int = 5000,
+    facility_type: str = "hospital",
+    language: str = "en",
+    max_results: int = 20,
+) -> str:
+    """Search for hospitals, clinics, or pharmacies near a location.
+
+    Args:
+        lat: Latitude of the search center
+        lng: Longitude of the search center
+        radius_meters: Search radius in meters (default: 5000, max: 50000)
+        facility_type: hospital | clinic | pharmacy | physiotherapist (default: hospital)
+        language: Language for results (default: en)
+        max_results: Maximum results to return (default: 20)
+    """
+    try:
+        radius_meters = min(radius_meters, 50000)
+        valid_types = {"hospital", "clinic", "pharmacy", "physiotherapist", "doctor"}
+        ptype = facility_type if facility_type in valid_types else "hospital"
+        response = _maps_client().places_nearby(
+            location=(lat, lng),
+            radius=radius_meters,
+            type=ptype,
+            language=language,
+        )
+        results = [_format_place(p) for p in response.get("results", [])[:max_results]]
+        return _maps_ok({
+            "status": "ok",
+            "center": {"lat": lat, "lng": lng},
+            "facility_type": ptype,
+            "radius_meters": radius_meters,
+            "count": len(results),
+            "results": results,
+        })
+    except Exception as e:
+        return _maps_err(e)
+
+
+@mcp.tool()
+def maps_get_place_details(place_id: str, language: str = "en") -> str:
+    """Get full details for a place by its place_id (from search results).
+
+    Returns: name, address, phone, website, opening hours, rating, reviews, lat/lng.
+
+    Args:
+        place_id: Google Maps place_id (from any maps_search_* result)
+        language: Language for results (default: en)
+    """
+    try:
+        fields = [
+            "name", "formatted_address", "formatted_phone_number",
+            "international_phone_number", "website", "opening_hours",
+            "rating", "user_ratings_total", "reviews", "geometry",
+            "types", "url", "vicinity",
+        ]
+        r = _maps_client().place(place_id=place_id, fields=fields, language=language)
+        p = r.get("result", {})
+        loc = p.get("geometry", {}).get("location", {})
+        hours = p.get("opening_hours", {})
+        return _maps_ok({
+            "status": "ok",
+            "place_id": place_id,
+            "name": p.get("name", ""),
+            "address": p.get("formatted_address", ""),
+            "phone": p.get("formatted_phone_number", ""),
+            "international_phone": p.get("international_phone_number", ""),
+            "website": p.get("website", ""),
+            "maps_url": p.get("url", ""),
+            "rating": p.get("rating"),
+            "user_ratings_total": p.get("user_ratings_total"),
+            "lat": loc.get("lat"),
+            "lng": loc.get("lng"),
+            "open_now": hours.get("open_now"),
+            "weekday_hours": hours.get("weekday_text", []),
+            "types": p.get("types", []),
+            "reviews": [
+                {
+                    "author": rv.get("author_name", ""),
+                    "rating": rv.get("rating"),
+                    "text": rv.get("text", "")[:300],
+                    "time": rv.get("relative_time_description", ""),
+                }
+                for rv in p.get("reviews", [])[:5]
+            ],
+        })
+    except Exception as e:
+        return _maps_err(e)
+
+
+@mcp.tool()
+def maps_calculate_distance(
+    origins: list,
+    destinations: list,
+    mode: str = "driving",
+    language: str = "en",
+) -> str:
+    """Calculate travel distance and time between locations using Distance Matrix.
+
+    Args:
+        origins: List of origin addresses or "lat,lng" strings
+                 (e.g. ["Bandra Mumbai", "19.0596,72.8295"])
+        destinations: List of destination addresses or "lat,lng" strings
+        mode: driving | walking | bicycling | transit (default: driving)
+        language: Language for results (default: en)
+    """
+    try:
+        valid_modes = {"driving", "walking", "bicycling", "transit"}
+        travel_mode = mode if mode in valid_modes else "driving"
+        response = _maps_client().distance_matrix(
+            origins=origins,
+            destinations=destinations,
+            mode=travel_mode,
+            language=language,
+        )
+        rows = []
+        for i, row in enumerate(response.get("rows", [])):
+            for j, el in enumerate(row.get("elements", [])):
+                rows.append({
+                    "origin": response["origin_addresses"][i] if i < len(response.get("origin_addresses", [])) else origins[i],
+                    "destination": response["destination_addresses"][j] if j < len(response.get("destination_addresses", [])) else destinations[j],
+                    "status": el.get("status"),
+                    "distance": el.get("distance", {}).get("text"),
+                    "distance_meters": el.get("distance", {}).get("value"),
+                    "duration": el.get("duration", {}).get("text"),
+                    "duration_seconds": el.get("duration", {}).get("value"),
+                })
+        return _maps_ok({"status": "ok", "mode": travel_mode, "results": rows})
+    except Exception as e:
+        return _maps_err(e)
+
+
+# ===========================================================================
+# GOOGLE TRENDS TOOLS
+# ===========================================================================
 
 def _build_pytrends(hl: str = "en-US", tz: int = 330) -> "TrendReq":
     """Create a TrendReq instance. tz=330 = IST (India Standard Time)."""

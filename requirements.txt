@@ -6,3 +6,4 @@ mcp>=1.6.0
 pytrends>=4.9.2
 pandas>=2.0.0
 urllib3>=1.26.0,<2.0
+googlemaps>=4.10.0
